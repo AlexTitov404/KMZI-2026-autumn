@@ -1,14 +1,17 @@
 ﻿#include <iostream>
 #include <iomanip>
 #include <sstream>
+#include <string>
+#include <cstring>
 #include "Calculator.h"
 #include "Belt.h"
 #include "BeltGcm.h"
 using namespace std;
 
-static string toHex(const vector<uint8_t>& d) {
+static string toHex(const uint8_t* d, size_t len) {
     ostringstream ss;
-    for (auto b : d) ss << hex << setw(2) << setfill('0') << (int)b;
+    for (size_t i = 0; i < len; ++i)
+        ss << hex << setw(2) << setfill('0') << (int)d[i];
     return ss.str();
 }
 
@@ -21,30 +24,54 @@ int main() {
     cout << "Инверсия:  " << hex << (int)calc.gf_inv(0x57) << dec << "\n\n";
 
     Belt belt;
-    vector<uint8_t> keyBytes = { 0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,
-                                 0x08,0x09,0x0A,0x0B,0x0C,0x0D,0x0E,0x0F };
-    auto key = belt.keyExpand(keyBytes);
+
+    uint8_t keyBytes[BELT_KEY_MAX] = {
+        0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,
+        0x08,0x09,0x0A,0x0B,0x0C,0x0D,0x0E,0x0F
+    };
+    size_t keyLen = 16;
+    uint32_t key[8];
+    belt.keyExpand(keyBytes, keyLen, key);
 
     BeltGcm gcm(key);
-    vector<uint8_t> iv = { 0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0A,0x0B };
+
+    uint8_t iv[GCM_IV_MAX] = {
+        0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,
+        0x08,0x09,0x0A,0x0B
+    };
+    size_t ivLen = 12;
 
     string msg = "Secret message";
-    vector<uint8_t> plaintext(msg.begin(), msg.end());
-    vector<uint8_t> aad = { 'h','d','r' };
+    uint8_t plaintext[GCM_MAX_DATA] = { 0 };
+    size_t ptLen = msg.size();
+    for (size_t i = 0; i < ptLen; ++i)
+        plaintext[i] = static_cast<uint8_t>(msg[i]);
+
+    uint8_t aad[GCM_MAX_DATA] = { 0 };
+    aad[0] = 'h'; aad[1] = 'd'; aad[2] = 'r';
+    size_t aadLen = 3;
 
     cout << "Открытый текст: " << msg << "\n";
-    cout << "                (hex: " << toHex(plaintext) << ")\n\n";
+    cout << "                (hex: " << toHex(plaintext, ptLen) << ")\n\n";
 
-    auto enc = gcm.encrypt(iv, plaintext, aad);
-    cout << "Зашифровано:    " << toHex(enc.ciphertext) << "\n";
-    cout << "Тег аутентификации: " << toHex(vector<uint8_t>(enc.tag.begin(), enc.tag.end())) << "\n\n";
+    BeltGcm::Encrypted enc;
+    gcm.encrypt(iv, ivLen, plaintext, ptLen, aad, aadLen, enc);
 
-    vector<uint8_t> decrypted;
-    bool ok = gcm.decrypt(iv, enc.ciphertext, aad, enc.tag, decrypted);
-    string decMsg(decrypted.begin(), decrypted.end());
+    cout << "Зашифровано:    " << toHex(enc.ciphertext, enc.ciphertextLen) << "\n";
+    cout << "Тег аутентификации: " << toHex(enc.tag, 16) << "\n\n";
+
+    uint8_t decrypted[GCM_MAX_DATA] = { 0 };
+    size_t decLen = 0;
+    bool ok = gcm.decrypt(iv, ivLen,
+        enc.ciphertext, enc.ciphertextLen,
+        aad, aadLen,
+        enc.tag,
+        decrypted, decLen);
+
+    string decMsg(reinterpret_cast<char*>(decrypted), decLen);
 
     cout << "Расшифровано:   " << decMsg << "\n";
-    cout << "                (hex: " << toHex(decrypted) << ")\n\n";
+    cout << "                (hex: " << toHex(decrypted, decLen) << ")\n\n";
 
     cout << "Проверка тега:  " << (ok ? "успешно" : "ОШИБКА!") << "\n";
     cout << "Совпадение с исходным текстом: " << (decMsg == msg ? "да" : "нет") << "\n";

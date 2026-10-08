@@ -1,11 +1,10 @@
 #include "Belt.h"
-#include <utility>
+#include <cstring>
 #include <stdexcept>
 
 Belt::Belt() {
     buildSBox();
 }
-
 
 void Belt::buildSBox() {
     for (int x = 0; x < 256; ++x) {
@@ -13,12 +12,12 @@ void Belt::buildSBox() {
     }
 }
 
-uint8_t Belt::ctTableLookup(const std::array<uint8_t, 256>& table, uint8_t idx) {
+uint8_t Belt::ctTableLookup(const uint8_t table[256], uint8_t idx) {
     uint8_t result = 0;
     for (int i = 0; i < 256; ++i) {
-        uint8_t diff = static_cast<uint8_t>(i) ^ idx;      // 0 <=> i == idx
-        int32_t t = static_cast<int32_t>(diff) - 1;        // -1 если diff==0, иначе >= 0
-        uint8_t mask = static_cast<uint8_t>(t >> 31);       // арифметический сдвиг: 0xFF если diff==0, иначе 0x00
+        uint8_t diff = static_cast<uint8_t>(i) ^ idx;
+        int32_t t = static_cast<int32_t>(diff) - 1;
+        uint8_t mask = static_cast<uint8_t>(t >> 31);
         result |= table[i] & mask;
     }
     return result;
@@ -26,18 +25,11 @@ uint8_t Belt::ctTableLookup(const std::array<uint8_t, 256>& table, uint8_t idx) 
 
 uint8_t Belt::H(uint8_t x) const { return ctTableLookup(Hbox, x); }
 
-// ---------------------------------------------------------------------
-// Циклический сдвиг 32-битного слова влево
-// ---------------------------------------------------------------------
 uint32_t Belt::rotl32(uint32_t x, int r) {
     r &= 31;
     return (x << r) | (x >> (32 - r));
 }
 
-// ---------------------------------------------------------------------
-// G_r(u) = (H(u0) || H(u1) || H(u2) || H(u3)) <<< r
-// где u0 — старший байт u, u3 — младший (big-endian порядок байт внутри слова)
-// ---------------------------------------------------------------------
 uint32_t Belt::G(uint32_t u, int r) const {
     uint8_t b3 = static_cast<uint8_t>((u >> 24) & 0xFF);
     uint8_t b2 = static_cast<uint8_t>((u >> 16) & 0xFF);
@@ -51,13 +43,10 @@ uint32_t Belt::G(uint32_t u, int r) const {
     return rotl32(v, r);
 }
 
-uint32_t Belt::G5(uint32_t u) const { return G(u, 5); }
+uint32_t Belt::G5(uint32_t u)  const { return G(u, 5); }
 uint32_t Belt::G13(uint32_t u) const { return G(u, 13); }
 uint32_t Belt::G21(uint32_t u) const { return G(u, 21); }
 
-// ---------------------------------------------------------------------
-// Расширение ключа (belt-keyexpand): key (16/24/32 байта) -> 8 слов по 32 бита
-// ---------------------------------------------------------------------
 static uint32_t loadWordLE(const uint8_t* p) {
     return static_cast<uint32_t>(p[0]) |
         (static_cast<uint32_t>(p[1]) << 8) |
@@ -65,62 +54,52 @@ static uint32_t loadWordLE(const uint8_t* p) {
         (static_cast<uint32_t>(p[3]) << 24);
 }
 
-std::array<uint32_t, 8> Belt::keyExpand(const std::vector<uint8_t>& key) const {
-    std::array<uint32_t, 8> w{};
+static void storeWordLE(uint8_t* p, uint32_t w) {
+    p[0] = static_cast<uint8_t>(w & 0xFF);
+    p[1] = static_cast<uint8_t>((w >> 8) & 0xFF);
+    p[2] = static_cast<uint8_t>((w >> 16) & 0xFF);
+    p[3] = static_cast<uint8_t>((w >> 24) & 0xFF);
+}
 
-    if (key.size() == 32) {
-        for (int i = 0; i < 8; ++i) w[i] = loadWordLE(&key[4 * i]);
+void Belt::keyExpand(const uint8_t* key, size_t keyLen, uint32_t out[8]) const {
+    for (int i = 0; i < 8; ++i) out[i] = 0;
+
+    if (keyLen == 32) {
+        for (int i = 0; i < 8; ++i) out[i] = loadWordLE(&key[4 * i]);
     }
-    else if (key.size() == 16) {
+    else if (keyLen == 16) {
         for (int i = 0; i < 4; ++i) {
             uint32_t word = loadWordLE(&key[4 * i]);
-            w[i] = word;
-            w[i + 4] = word;
+            out[i] = word;
+            out[i + 4] = word;
         }
     }
-    else if (key.size() == 24) {
-        for (int i = 0; i < 6; ++i) w[i] = loadWordLE(&key[4 * i]);
-        // Y1 = w0,w1  Y2 = w2,w3  Y3 = w4,w5 ; w6..w7 = Y1 xor Y2 xor Y3
-        w[6] = w[0] ^ w[2] ^ w[4];
-        w[7] = w[1] ^ w[3] ^ w[5];
+    else if (keyLen == 24) {
+        for (int i = 0; i < 6; ++i) out[i] = loadWordLE(&key[4 * i]);
+        out[6] = out[0] ^ out[2] ^ out[4];
+        out[7] = out[1] ^ out[3] ^ out[5];
     }
     else {
         throw std::invalid_argument("belt key length must be 16, 24 or 32 bytes");
     }
-    return w;
 }
 
-// ---------------------------------------------------------------------
-// Индекс раундового ключа: k[7i - delta - 1] (mod 8), i = 1..8
-// ---------------------------------------------------------------------
-uint32_t Belt::keyIdx(const std::array<uint32_t, 8>& key, int i, int delta) {
+uint32_t Belt::keyIdx(const uint32_t key[8], int i, int delta) {
     return key[(7 * i - delta - 1) % 8];
 }
 
-std::array<uint32_t, 4> Belt::bytesToWords(const std::array<uint8_t, 16>& block) {
-    std::array<uint32_t, 4> x{};
+void Belt::bytesToWords(const uint8_t block[16], uint32_t x[4]) {
     for (int i = 0; i < 4; ++i) x[i] = loadWordLE(&block[4 * i]);
-    return x;
 }
 
-std::array<uint8_t, 16> Belt::wordsToBytes(const std::array<uint32_t, 4>& words) {
-    std::array<uint8_t, 16> block{};
-    for (int i = 0; i < 4; ++i) {
-        uint32_t w = words[i];
-        block[4 * i + 0] = static_cast<uint8_t>(w & 0xFF);
-        block[4 * i + 1] = static_cast<uint8_t>((w >> 8) & 0xFF);
-        block[4 * i + 2] = static_cast<uint8_t>((w >> 16) & 0xFF);
-        block[4 * i + 3] = static_cast<uint8_t>((w >> 24) & 0xFF);
-    }
-    return block;
+void Belt::wordsToBytes(const uint32_t x[4], uint8_t block[16]) {
+    for (int i = 0; i < 4; ++i) storeWordLE(&block[4 * i], x[i]);
 }
 
-// ---------------------------------------------------------------------
-// Зашифрование блока (belt-block, раздел 6.1.3 стандарта)
-// ---------------------------------------------------------------------
-std::array<uint8_t, 16> Belt::encryptBlock(const std::array<uint8_t, 16>& block,
-    const std::array<uint32_t, 8>& key) const {
-    auto x = bytesToWords(block);
+void Belt::encryptBlock(const uint8_t in[16], const uint32_t key[8],
+    uint8_t out[16]) const {
+    uint32_t x[4];
+    bytesToWords(in, x);
     uint32_t a = x[0], b = x[1], c = x[2], d = x[3];
 
     for (int i = 1; i <= 8; ++i) {
@@ -138,15 +117,14 @@ std::array<uint8_t, 16> Belt::encryptBlock(const std::array<uint8_t, 16>& block,
         std::swap(b, c);
     }
 
-    return wordsToBytes({ b, d, a, c });
+    uint32_t res[4] = { b, d, a, c };
+    wordsToBytes(res, out);
 }
 
-// ---------------------------------------------------------------------
-// Расшифрование блока (обратное преобразование)
-// ---------------------------------------------------------------------
-std::array<uint8_t, 16> Belt::decryptBlock(const std::array<uint8_t, 16>& block,
-    const std::array<uint32_t, 8>& key) const {
-    auto x = bytesToWords(block);
+void Belt::decryptBlock(const uint8_t in[16], const uint32_t key[8],
+    uint8_t out[16]) const {
+    uint32_t x[4];
+    bytesToWords(in, x);
     uint32_t a = x[0], b = x[1], c = x[2], d = x[3];
 
     for (int i = 8; i >= 1; --i) {
@@ -164,5 +142,6 @@ std::array<uint8_t, 16> Belt::decryptBlock(const std::array<uint8_t, 16>& block,
         std::swap(a, d);
     }
 
-    return wordsToBytes({ c, a, d, b });
+    uint32_t res[4] = { c, a, d, b };
+    wordsToBytes(res, out);
 }

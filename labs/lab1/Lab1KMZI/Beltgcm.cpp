@@ -1,27 +1,29 @@
 #include "BeltGcm.h"
 #include <cstring>
 
-BeltGcm::BeltGcm(const std::array<uint32_t, 8>& expandedKey) : key(expandedKey) {
-    std::array<uint8_t, 16> zero{};
-    Hsub = belt.encryptBlock(zero, key);
+BeltGcm::BeltGcm(const uint32_t expandedKey[8]) {
+    for (int i = 0; i < 8; ++i) key[i] = expandedKey[i];
+    uint8_t zero[16] = { 0 };
+    belt.encryptBlock(zero, key, Hsub);
 }
 
-std::array<uint8_t, 16> BeltGcm::gf128Mul(const std::array<uint8_t, 16>& X,
-    const std::array<uint8_t, 16>& Y) {
-    std::array<uint8_t, 16> Z{};   
-    std::array<uint8_t, 16> V = Y; 
-    constexpr uint8_t R0 = 0xE1;   
+void BeltGcm::gf128Mul(const uint8_t X[16], const uint8_t Y[16], uint8_t Z[16]) {
+    uint8_t V[16];
+    std::memcpy(V, Y, 16);
+    std::memset(Z, 0, 16);
+
+    constexpr uint8_t R0 = 0xE1;
 
     for (int i = 0; i < 128; ++i) {
         int byteIdx = i / 8;
         int bitIdx = 7 - (i % 8);
         uint8_t xbit = (X[byteIdx] >> bitIdx) & 1;
-        uint8_t mask = static_cast<uint8_t>(0 - xbit); 
+        uint8_t mask = static_cast<uint8_t>(0 - xbit);
 
         for (int k = 0; k < 16; ++k) Z[k] ^= (V[k] & mask);
 
-        uint8_t lsb = V[15] & 1;                       
-        uint8_t lmask = static_cast<uint8_t>(0 - lsb);  
+        uint8_t lsb = V[15] & 1;
+        uint8_t lmask = static_cast<uint8_t>(0 - lsb);
 
         uint8_t carry = 0;
         for (int k = 0; k < 16; ++k) {
@@ -29,135 +31,138 @@ std::array<uint8_t, 16> BeltGcm::gf128Mul(const std::array<uint8_t, 16>& X,
             V[k] = static_cast<uint8_t>((V[k] >> 1) | (carry << 7));
             carry = newCarry;
         }
-        V[0] ^= (R0 & lmask); 
+        V[0] ^= (R0 & lmask);
     }
-    return Z;
 }
 
-static void ghashBlock(std::array<uint8_t, 16>& y, const uint8_t* block,
-    const std::array<uint8_t, 16>& H,
-    std::array<uint8_t, 16>(*mul)(const std::array<uint8_t, 16>&,
-        const std::array<uint8_t, 16>&)) {
-    std::array<uint8_t, 16> x{};
+static void ghashBlock(uint8_t y[16], const uint8_t* block, const uint8_t H[16]) {
+    uint8_t x[16];
     for (int i = 0; i < 16; ++i) x[i] = y[i] ^ block[i];
-    y = mul(x, H);
+    BeltGcm::gf128Mul(x, H, y);
 }
 
-std::array<uint8_t, 16> BeltGcm::ghash(const std::vector<uint8_t>& aad,
-    const std::vector<uint8_t>& c) const {
-    std::array<uint8_t, 16> y{}; 
+void BeltGcm::ghash(const uint8_t* aad, size_t aadLen,
+    const uint8_t* c, size_t cLen,
+    uint8_t out[16]) const {
+    uint8_t y[16] = { 0 };
 
     size_t i = 0;
-    for (; i + 16 <= aad.size(); i += 16) ghashBlock(y, &aad[i], Hsub, gf128Mul);
-    if (i < aad.size()) {
-        std::array<uint8_t, 16> block{};
-        std::memcpy(block.data(), &aad[i], aad.size() - i);
-        ghashBlock(y, block.data(), Hsub, gf128Mul);
+    for (; i + 16 <= aadLen; i += 16) ghashBlock(y, &aad[i], Hsub);
+    if (i < aadLen) {
+        uint8_t block[16] = { 0 };
+        std::memcpy(block, &aad[i], aadLen - i);
+        ghashBlock(y, block, Hsub);
     }
 
     i = 0;
-    for (; i + 16 <= c.size(); i += 16) ghashBlock(y, &c[i], Hsub, gf128Mul);
-    if (i < c.size()) {
-        std::array<uint8_t, 16> block{};
-        std::memcpy(block.data(), &c[i], c.size() - i);
-        ghashBlock(y, block.data(), Hsub, gf128Mul);
+    for (; i + 16 <= cLen; i += 16) ghashBlock(y, &c[i], Hsub);
+    if (i < cLen) {
+        uint8_t block[16] = { 0 };
+        std::memcpy(block, &c[i], cLen - i);
+        ghashBlock(y, block, Hsub);
     }
 
-   
-    std::array<uint8_t, 16> lenBlock{};
-    uint64_t aadBits = static_cast<uint64_t>(aad.size()) * 8;
-    uint64_t cBits = static_cast<uint64_t>(c.size()) * 8;
+    uint8_t lenBlock[16] = { 0 };
+    uint64_t aadBits = static_cast<uint64_t>(aadLen) * 8;
+    uint64_t cBits = static_cast<uint64_t>(cLen) * 8;
     for (int k = 0; k < 8; ++k) lenBlock[k] = static_cast<uint8_t>(aadBits >> (56 - 8 * k));
     for (int k = 0; k < 8; ++k) lenBlock[8 + k] = static_cast<uint8_t>(cBits >> (56 - 8 * k));
-    ghashBlock(y, lenBlock.data(), Hsub, gf128Mul);
+    ghashBlock(y, lenBlock, Hsub);
 
-    return y;
+    std::memcpy(out, y, 16);
 }
 
-
-std::array<uint8_t, 16> BeltGcm::computeJ0(const std::vector<uint8_t>& iv) const {
-    std::array<uint8_t, 16> J0{};
-    if (iv.size() == 12) {
-        std::memcpy(J0.data(), iv.data(), 12);
+void BeltGcm::computeJ0(const uint8_t* iv, size_t ivLen, uint8_t J0[16]) const {
+    std::memset(J0, 0, 16);
+    if (ivLen == 12) {
+        std::memcpy(J0, iv, 12);
         J0[12] = 0; J0[13] = 0; J0[14] = 0; J0[15] = 1;
     }
     else {
-        
-        J0 = ghash({}, iv);
+        ghash(nullptr, 0, iv, ivLen, J0);
     }
-    return J0;
 }
 
-void BeltGcm::incr32(std::array<uint8_t, 16>& block) {
+void BeltGcm::incr32(uint8_t block[16]) {
     for (int i = 15; i >= 12; --i) {
-        if (++block[i] != 0) break; 
+        if (++block[i] != 0) break;
     }
 }
 
-std::vector<uint8_t> BeltGcm::ctr(std::array<uint8_t, 16> icb, const std::vector<uint8_t>& input) const {
-    std::vector<uint8_t> out(input.size());
-    std::array<uint8_t, 16> cb = icb;
+void BeltGcm::ctr(const uint8_t icb[16], const uint8_t* input, size_t len,
+    uint8_t* out) const {
+    uint8_t cb[16];
+    std::memcpy(cb, icb, 16);
 
     size_t i = 0;
-    while (i < input.size()) {
-        auto ks = belt.encryptBlock(cb, key); 
-        size_t chunk = std::min<size_t>(16, input.size() - i);
+    while (i < len) {
+        uint8_t ks[16];
+        belt.encryptBlock(cb, key, ks);
+        size_t chunk = (len - i < 16) ? (len - i) : 16;
         for (size_t k = 0; k < chunk; ++k) out[i + k] = input[i + k] ^ ks[k];
         i += chunk;
         incr32(cb);
     }
-    return out;
 }
 
-bool BeltGcm::ctEqual(const std::array<uint8_t, 16>& a, const std::array<uint8_t, 16>& b) {
+bool BeltGcm::ctEqual(const uint8_t a[16], const uint8_t b[16]) {
     uint8_t diff = 0;
     for (int i = 0; i < 16; ++i) diff |= static_cast<uint8_t>(a[i] ^ b[i]);
     return diff == 0;
 }
 
+void BeltGcm::encrypt(const uint8_t* iv, size_t ivLen,
+    const uint8_t* plaintext, size_t ptLen,
+    const uint8_t* aad, size_t aadLen,
+    Encrypted& out) const {
+    uint8_t J0[16];
+    computeJ0(iv, ivLen, J0);
 
-BeltGcm::Encrypted BeltGcm::encrypt(const std::vector<uint8_t>& iv,
-    const std::vector<uint8_t>& plaintext,
-    const std::vector<uint8_t>& aad) const {
-    auto J0 = computeJ0(iv);
-
-    auto J0inc = J0;
+    uint8_t J0inc[16];
+    std::memcpy(J0inc, J0, 16);
     incr32(J0inc);
-    auto C = ctr(J0inc, plaintext); 
 
-    auto S = ghash(aad, C);
-    auto E_J0 = belt.encryptBlock(J0, key);
+    ctr(J0inc, plaintext, ptLen, out.ciphertext);
+    out.ciphertextLen = ptLen;
 
-    Encrypted result;
-    result.ciphertext = std::move(C);
-    for (int i = 0; i < 16; ++i) result.tag[i] = E_J0[i] ^ S[i];
-    return result;
+    uint8_t S[16];
+    ghash(aad, aadLen, out.ciphertext, ptLen, S);
+
+    uint8_t EJ0[16];
+    belt.encryptBlock(J0, key, EJ0);
+
+    for (int i = 0; i < 16; ++i) out.tag[i] = EJ0[i] ^ S[i];
 }
 
+bool BeltGcm::decrypt(const uint8_t* iv, size_t ivLen,
+    const uint8_t* ciphertext, size_t ctLen,
+    const uint8_t* aad, size_t aadLen,
+    const uint8_t tag[16],
+    uint8_t* plaintextOut, size_t& plaintextLenOut) const {
+    uint8_t J0[16];
+    computeJ0(iv, ivLen, J0);
 
-bool BeltGcm::decrypt(const std::vector<uint8_t>& iv,
-    const std::vector<uint8_t>& ciphertext,
-    const std::vector<uint8_t>& aad,
-    const std::array<uint8_t, 16>& tag,
-    std::vector<uint8_t>& plaintextOut) const {
-    auto J0 = computeJ0(iv);
+    uint8_t S[16];
+    ghash(aad, aadLen, ciphertext, ctLen, S);
 
-    auto S = ghash(aad, ciphertext);
-    auto E_J0 = belt.encryptBlock(J0, key);
+    uint8_t EJ0[16];
+    belt.encryptBlock(J0, key, EJ0);
 
-    std::array<uint8_t, 16> expectedTag{};
-    for (int i = 0; i < 16; ++i) expectedTag[i] = E_J0[i] ^ S[i];
+    uint8_t expectedTag[16];
+    for (int i = 0; i < 16; ++i) expectedTag[i] = EJ0[i] ^ S[i];
 
-    bool ok = ctEqual(expectedTag, tag); 
+    bool ok = ctEqual(expectedTag, tag);
 
-    auto J0inc = J0;
+    uint8_t J0inc[16];
+    std::memcpy(J0inc, J0, 16);
     incr32(J0inc);
-    auto P = ctr(J0inc, ciphertext);
 
-    if (ok) {
-        plaintextOut = std::move(P);
-        return true;
+    ctr(J0inc, ciphertext, ctLen, plaintextOut);
+    plaintextLenOut = ctLen;
+
+    if (!ok) {
+        std::memset(plaintextOut, 0, ctLen);
+        plaintextLenOut = 0;
     }
-    plaintextOut.clear();
-    return false;
+    return ok;
 }
